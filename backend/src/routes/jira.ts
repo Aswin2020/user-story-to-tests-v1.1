@@ -11,6 +11,12 @@ const JiraConnectionSchema = z.object({
   apiKey: z.string().min(1, 'API key is required')
 })
 
+// Extended validation schema for sprint filtering
+const StoriesRequestSchema = JiraConnectionSchema.extend({
+  projectKey: z.string().optional(),
+  sprintId: z.number().optional()
+})
+
 // Test Jira connection
 jiraRouter.post('/test-connection', async (req: express.Request, res: express.Response): Promise<void> => {
   try {
@@ -56,7 +62,7 @@ jiraRouter.post('/test-connection', async (req: express.Request, res: express.Re
 jiraRouter.post('/stories', async (req: express.Request, res: express.Response): Promise<void> => {
   try {
     console.log('📝 Stories request received')
-    const validation = JiraConnectionSchema.safeParse(req.body)
+    const validation = StoriesRequestSchema.safeParse(req.body)
     
     if (!validation.success) {
       console.error('❌ Validation failed:', validation.error.message)
@@ -68,7 +74,7 @@ jiraRouter.post('/stories', async (req: express.Request, res: express.Response):
       return
     }
 
-    const { baseUrl, email, apiKey } = validation.data
+    const { baseUrl, email, apiKey, projectKey, sprintId } = validation.data
     console.log(`🔗 Creating JiraService for: ${baseUrl}`)
     const jiraService = new JiraService(baseUrl, email, apiKey)
     
@@ -85,11 +91,17 @@ jiraRouter.post('/stories', async (req: express.Request, res: express.Response):
       return
     }
 
-    // Fetch user stories
-    console.log('📋 Fetching stories...')
-    const stories = await jiraService.getUserStories()
+    // Fetch user stories with optional sprint filter and project key
+    console.log(`📋 Fetching stories${projectKey ? ` for project ${projectKey}` : ''}${sprintId ? ` and sprint ${sprintId}` : ''}...`)
+    const stories = await jiraService.getUserStories(projectKey, sprintId)
     
     console.log(`✅ Successfully fetched ${stories.length} stories`)
+    if (stories.length > 0) {
+      console.log(`📋 Stories retrieved:`)
+      stories.forEach((story, idx) => {
+        console.log(`   ${idx + 1}. [${story.key}] ${story.title}`)
+      })
+    }
     res.json({
       success: true,
       stories,
@@ -135,6 +147,67 @@ jiraRouter.post('/projects', async (req: express.Request, res: express.Response)
     res.status(500).json({
       error: errorMessage,
       projects: []
+    })
+  }
+})
+// Fetch sprints from Jira
+jiraRouter.post('/sprints', async (req: express.Request, res: express.Response): Promise<void> => {
+  try {
+    console.log('📅 Sprints request received')
+    const validation = JiraConnectionSchema.extend({
+      projectKey: z.string().min(1, 'Project key is required')
+    }).safeParse(req.body)
+    
+    if (!validation.success) {
+      console.error('❌ Validation failed:', validation.error.message)
+      res.status(400).json({
+        error: `Validation error: ${validation.error.message}`,
+        sprints: [],
+        success: false
+      })
+      return
+    }
+
+    const { baseUrl, email, apiKey, projectKey } = validation.data
+    console.log(`🔗 Creating JiraService for: ${baseUrl}`)
+    const jiraService = new JiraService(baseUrl, email, apiKey)
+    
+    // First verify connection
+    console.log('🧪 Verifying connection...')
+    const isConnected = await jiraService.testConnection()
+    if (!isConnected) {
+      console.error('❌ Failed to authenticate with Jira')
+      res.status(401).json({
+        error: 'Failed to authenticate with Jira. Please verify your credentials.',
+        sprints: [],
+        success: false
+      })
+      return
+    }
+
+    // Fetch sprints
+    console.log(`📋 Fetching sprints for project: ${projectKey}...`)
+    const sprints = await jiraService.getSprints(projectKey)
+    
+    console.log(`✅ Successfully fetched ${sprints.length} sprints`)
+    if (sprints.length > 0) {
+      console.log(`📅 Sprints list:`)
+      sprints.forEach((sprint, idx) => {
+        console.log(`   ${idx}. [ID: ${sprint.id}] ${sprint.name} (${sprint.state})`)
+      })
+    }
+    res.json({
+      success: true,
+      sprints,
+      count: sprints.length
+    })
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Failed to fetch sprints from Jira'
+    console.error('❌ Error fetching Jira sprints:', errorMsg)
+    res.status(500).json({
+      error: errorMsg,
+      sprints: [],
+      success: false
     })
   }
 })

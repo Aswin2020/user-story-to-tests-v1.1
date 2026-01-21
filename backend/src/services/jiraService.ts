@@ -16,6 +16,14 @@ export interface JiraUserStory {
   description: string
 }
 
+export interface JiraSprint {
+  id: number
+  name: string
+  state: string
+  startDate?: string
+  endDate?: string
+}
+
 export class JiraService {
   private baseUrl: string
   private email: string
@@ -65,15 +73,25 @@ export class JiraService {
     }
   }
 
-  async getUserStories(projectKey?: string): Promise<JiraUserStory[]> {
+  async getUserStories(projectKey?: string, sprintId?: number): Promise<JiraUserStory[]> {
     try {
       console.log(`📝 Fetching user stories from Jira...`)
+      console.log(`   Project Key: ${projectKey || 'not specified'}`)
+      console.log(`   Sprint ID: ${sprintId || 'not specified'}`)
       
       // Build JQL query - fetch issues with type Story or Task
       let jql = 'type in (Story, Task) ORDER BY created DESC'
       
       if (projectKey) {
         jql = `project = ${projectKey} AND type in (Story, Task) ORDER BY created DESC`
+      }
+
+      // Add sprint filter if sprintId is provided
+      if (sprintId) {
+        jql = `sprint = ${sprintId} AND type in (Story, Task) ORDER BY created DESC`
+        if (projectKey) {
+          jql = `project = ${projectKey} AND sprint = ${sprintId} AND type in (Story, Task) ORDER BY created DESC`
+        }
       }
 
       console.log(`🔍 JQL Query: ${jql}`)
@@ -110,7 +128,7 @@ export class JiraService {
         id: issue.id,
         key: issue.key,
         title: issue.fields.summary,
-        description: this.extractTextFromDescription(issue.fields.description) || issue.fields.summary
+        description: this.formatDescription(issue.fields.description) || issue.fields.summary
       }))
 
       console.log(`✅ Successfully fetched ${stories.length} user stories`)
@@ -156,7 +174,82 @@ export class JiraService {
     }
   }
 
-  private extractTextFromDescription(description: any): string {
+  async getSprints(projectKey: string): Promise<JiraSprint[]> {
+    try {
+      console.log(`📅 Fetching sprints for project: ${projectKey}...`)
+      
+      // Step 1: Get the board ID for the project using Jira Agile API
+      console.log(`🔍 Getting board for project ${projectKey}...`)
+      const boardResponse = await fetch(`${this.baseUrl}/rest/agile/1.0/board?projectKeyOrId=${projectKey}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': this.getAuthHeader(),
+          'Content-Type': 'application/json'
+        }
+      })
+
+      if (!boardResponse.ok) {
+        const errorText = await boardResponse.text()
+        console.error(`❌ Failed to fetch board: ${boardResponse.status}`)
+        return []
+      }
+
+      const boardData = await boardResponse.json() as any
+      
+      if (!boardData.values || boardData.values.length === 0) {
+        console.log(`⚠️ No boards found for project ${projectKey}`)
+        return []
+      }
+
+      const boardId = boardData.values[0].id
+      console.log(`✅ Found board ID: ${boardId} (${boardData.values[0].name})`)
+
+      // Step 2: Get sprints for the board
+      const response = await fetch(`${this.baseUrl}/rest/agile/1.0/board/${boardId}/sprint`, {
+        method: 'GET',
+        headers: {
+          'Authorization': this.getAuthHeader(),
+          'Content-Type': 'application/json'
+        }
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error(`❌ Failed to fetch sprints: ${response.status}`)
+        return []
+      }
+
+      const data = await response.json() as any
+      console.log(`📊 Raw sprint response:`, JSON.stringify(data.values?.slice(0, 2), null, 2))
+      
+      const sprints = data.values?.map((s: any) => ({
+        id: s.id,
+        name: s.name,
+        state: s.state.toLowerCase(),
+        startDate: s.startDate,
+        endDate: s.endDate
+      })) || []
+
+      console.log(`📊 All sprints retrieved:`, sprints.map((s: JiraSprint) => ({ id: s.id, name: s.name, state: s.state })))
+
+      // Filter to active sprints (open/active) but include future sprints
+      const filteredSprints = sprints.filter((s: JiraSprint) => 
+        s.state === 'active' || s.state === 'future'
+      )
+
+      console.log(`✅ Found ${filteredSprints.length} active/future sprints`)
+      filteredSprints.forEach((sprint: JiraSprint) => {
+        console.log(`   - [ID: ${sprint.id}] ${sprint.name} (${sprint.state})`)
+      })
+
+      return filteredSprints
+    } catch (error) {
+      console.error(`❌ Error fetching sprints:`, error)
+      return [] // Return empty array instead of throwing to gracefully handle errors
+    }
+  }
+
+  private formatDescription(description: any): string {
     if (!description) return ''
     
     // If it's a string, return as-is

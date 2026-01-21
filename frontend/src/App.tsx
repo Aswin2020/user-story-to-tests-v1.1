@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { generateTests, generateMultiTests, fetchJiraStories } from './api'
+import { generateTests, generateMultiTests, fetchJiraStories, fetchJiraSprints } from './api'
 import { GenerateRequest, GenerateResponse, TestCase, GenerateMultiRequest } from './types'
 import { downloadAsCSV, downloadAsXLS } from './downloadUtils'
 
@@ -7,6 +7,7 @@ interface JiraConnection {
   baseUrl: string
   email: string
   apiKey: string
+  projectKey?: string
 }
 
 interface JiraUserStory {
@@ -14,6 +15,14 @@ interface JiraUserStory {
   key: string
   title: string
   description: string
+}
+
+interface JiraSprint {
+  id: number
+  name: string
+  state: string
+  startDate?: string
+  endDate?: string
 }
 
 function App() {
@@ -29,39 +38,50 @@ function App() {
   const [expandedTestCases, setExpandedTestCases] = useState<Set<string>>(new Set())
   const [selectedStoryIds, setSelectedStoryIds] = useState<Set<string>>(new Set())
   
-  // Jira Connection States
-  const [jiraConnection, setJiraConnection] = useState<JiraConnection | null>(() => {
-    try {
-      const saved = localStorage.getItem('jiraConnection')
-      if (!saved) return null
-      const parsed = JSON.parse(saved)
-      if (parsed && parsed.baseUrl && parsed.email && parsed.apiKey) return parsed
-      localStorage.removeItem('jiraConnection')
-      return null
-    } catch (e) {
-      localStorage.removeItem('jiraConnection')
-      return null
-    }
-  })
+  // Jira Connection States - Always start disconnected
+  const [jiraConnection, setJiraConnection] = useState<JiraConnection | null>(null)
   const [showJiraModal, setShowJiraModal] = useState<boolean>(false)
   const [jiraFormData, setJiraFormData] = useState<JiraConnection>({
     baseUrl: '',
     email: '',
-    apiKey: ''
+    apiKey: '',
+    projectKey: ''
   })
   const [jiraUserStories, setJiraUserStories] = useState<JiraUserStory[]>([])
   const [jiraLoading, setJiraLoading] = useState<boolean>(false)
   const [jiraError, setJiraError] = useState<string | null>(null)
+  
+  // Sprint states
+  const [jiraSprints, setJiraSprints] = useState<JiraSprint[]>([])
+  const [selectedSprintId, setSelectedSprintId] = useState<number | null>(null)
+  const [sprintsLoading, setSprintsLoading] = useState<boolean>(false)
+  const [manualSprintId, setManualSprintId] = useState<string>('')
 
   // Jira Connection Handlers
   const handleJiraInputChange = (field: keyof JiraConnection, value: string) => {
     setJiraFormData(prev => ({ ...prev, [field]: value }))
   }
 
+  const handleOpenJiraModal = () => {
+    // Load saved credentials when opening modal (for convenience)
+    try {
+      const saved = localStorage.getItem('jiraConnection')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        if (parsed && parsed.baseUrl && parsed.email && parsed.apiKey && parsed.projectKey) {
+          setJiraFormData(parsed)
+        }
+      }
+    } catch (e) {
+      // Ignore errors, just use empty form
+    }
+    setShowJiraModal(true)
+  }
+
   const handleConnectJira = async (e: React.FormEvent) => {
     e.preventDefault()
     
-    if (!jiraFormData.baseUrl.trim() || !jiraFormData.email.trim() || !jiraFormData.apiKey.trim()) {
+    if (!jiraFormData.baseUrl.trim() || !jiraFormData.email.trim() || !jiraFormData.apiKey.trim() || !jiraFormData.projectKey?.trim()) {
       setJiraError('All Jira connection fields are required')
       return
     }
@@ -94,7 +114,7 @@ function App() {
 
       console.log('✅ Connection saved, closing modal')
       setShowJiraModal(false)
-      setJiraFormData({ baseUrl: '', email: '', apiKey: '' })
+      setJiraFormData({ baseUrl: '', email: '', apiKey: '', projectKey: '' })
     } catch (err) {
       console.error('❌ Connection error:', err)
       const errorMsg = err instanceof Error ? err.message : 'Failed to connect to Jira'
@@ -104,36 +124,107 @@ function App() {
     }
   }
 
-  const fetchJiraUserStories = async (connection: JiraConnection) => {
+  const fetchJiraUserStories = async (connection: JiraConnection, sprintId?: number) => {
     try {
       console.log('📋 Starting fetchJiraUserStories...')
+      console.log(`📝 Fetching stories from Jira${sprintId ? ` for sprint ${sprintId}` : ''}...`)
+      console.log('🔗 Using connection:', { baseUrl: connection.baseUrl, email: connection.email, projectKey: connection.projectKey })
+      console.log('📊 Sprint ID being passed:', sprintId)
+      
       setJiraLoading(true)
       setJiraError(null)
-      
-      console.log('📝 Fetching stories from Jira...')
       
       // Call backend API to fetch from real Jira
       const stories = await fetchJiraStories({
         baseUrl: connection.baseUrl,
         email: connection.email,
-        apiKey: connection.apiKey
-      })
+        apiKey: connection.apiKey,
+        projectKey: connection.projectKey
+      }, sprintId)
       
       console.log('✅ Stories fetched successfully:', stories.length)
+      console.log('📋 Stories data:', stories)
       setJiraUserStories(stories)
+      
+      // Extract project key from first story if available (for sprint fetching)
+      if (stories.length > 0 && jiraSprints.length === 0) {
+        const projectKey = stories[0].key.split('-')[0]
+        console.log(`📅 Extracted project key: ${projectKey}`)
+        // Auto-fetch sprints with extracted project key
+        fetchJiraSprintsData(connection, projectKey).catch((err) => {
+          console.log('ℹ️ Sprints not available for this project')
+        })
+      }
       
       if (stories.length === 0) {
         console.warn('⚠️ No stories found')
-        setJiraError('⚠️ No user stories found in Jira. Make sure your project has issues with type Story or Task.')
+        const msg = '⚠️ No user stories found in Jira. Make sure your project has issues with type Story or Task.'
+        setJiraError(msg)
+        alert(msg)
       }
     } catch (err) {
       console.error('❌ Error fetching stories:', err)
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch user stories from Jira'
+      console.error('Full error:', errorMsg)
       setJiraError(errorMsg)
       setJiraUserStories([])
+      alert(`❌ Error: ${errorMsg}`)
     } finally {
       console.log('✅ fetchJiraUserStories completed')
       setJiraLoading(false)
+    }
+  }
+
+  const fetchJiraSprintsData = async (connection: JiraConnection, projectKey?: string) => {
+    try {
+      console.log('📅 Starting fetchJiraSprintsData...')
+      setSprintsLoading(true)
+      
+      // If no project key provided, we'll try to get sprints anyway (it might work depending on Jira setup)
+      // In most cases, if the user has done sprint-based work, they'll have a default project
+      let key = projectKey || 'DEFAULT' // Try with a common default
+      
+      console.log(`📝 Fetching sprints for project: ${key}...`)
+      
+      // Call backend API to fetch sprints
+      const sprints = await fetchJiraSprints({
+        baseUrl: connection.baseUrl,
+        email: connection.email,
+        apiKey: connection.apiKey
+      }, key)
+      
+      console.log('✅ Sprints fetched successfully:', sprints.length)
+      console.log('📅 Sprints list:')
+      sprints.forEach((sprint, idx) => {
+        console.log(`   ${idx}. [ID: ${sprint.id}] ${sprint.name} (${sprint.state})`)
+      })
+      setJiraSprints(sprints)
+      
+      // Reset sprint selection
+      setSelectedSprintId(null)
+    } catch (err) {
+      console.error('❌ Error fetching sprints:', err)
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch sprints'
+      console.warn(errorMsg)
+      setJiraSprints([]) // Empty list if error (sprints might not be enabled or project key wrong)
+    } finally {
+      console.log('✅ fetchJiraSprintsData completed')
+      setSprintsLoading(false)
+    }
+  }
+
+  const handleSprintChange = async (sprintId: number | null) => {
+    console.log(`📅 Sprint selected: ${sprintId}`)
+    setSelectedSprintId(sprintId)
+    
+    if (jiraConnection) {
+      // Find the selected sprint to log details
+      if (sprintId) {
+        const selectedSprint = jiraSprints.find(s => s.id === sprintId)
+        console.log(`📅 Selected Sprint Details:`, selectedSprint)
+      }
+      // Fetch stories for selected sprint
+      await fetchJiraUserStories(jiraConnection, sprintId || undefined)
     }
   }
 
@@ -142,6 +233,9 @@ function App() {
     setJiraConnection(null)
     setJiraUserStories([])
     setJiraError(null)
+    setJiraSprints([])
+    setSelectedSprintId(null)
+    setManualSprintId('')
   }
 
   const handleSelectJiraStory = (story: JiraUserStory) => {
@@ -161,6 +255,26 @@ function App() {
       newSelected.add(storyId)
     }
     setSelectedStoryIds(newSelected)
+  }
+
+  const handleSelectAllStories = () => {
+    const allStoryIds = new Set(jiraUserStories.map(story => story.id))
+    setSelectedStoryIds(allStoryIds)
+  }
+
+  const handleDeselectAllStories = () => {
+    setSelectedStoryIds(new Set())
+  }
+
+  const handleClearForm = () => {
+    setFormData({
+      storyTitle: '',
+      acceptanceCriteria: '',
+      description: '',
+      additionalInfo: ''
+    })
+    setResults(null)
+    setError(null)
   }
 
   const handleGenerateMulti = async () => {
@@ -339,6 +453,50 @@ function App() {
         
         .jira-btn.disconnect:hover {
           background: #c82333;
+        }
+        
+        .sprint-selector {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 15px;
+          background: #f8f9fa;
+          border-radius: 6px;
+          border: 1px solid #e1e8ed;
+          margin-bottom: 20px;
+        }
+        
+        .sprint-selector-label {
+          font-weight: 600;
+          color: #2c3e50;
+          white-space: nowrap;
+        }
+        
+        .sprint-selector-dropdown {
+          flex: 1;
+          padding: 8px 12px;
+          border: 1px solid #d1d5da;
+          border-radius: 6px;
+          font-size: 14px;
+          background: white;
+          color: #2c3e50;
+          cursor: pointer;
+          transition: border-color 0.2s;
+        }
+        
+        .sprint-selector-dropdown:hover {
+          border-color: #0052cc;
+        }
+        
+        .sprint-selector-dropdown:focus {
+          outline: none;
+          border-color: #0052cc;
+          box-shadow: 0 0 0 3px rgba(0, 82, 204, 0.1);
+        }
+        
+        .sprint-selector-dropdown option {
+          padding: 8px;
+          color: #2c3e50;
         }
         
         .modal {
@@ -787,7 +945,7 @@ function App() {
                 <>
                   <button 
                     className="jira-btn" 
-                    onClick={() => setShowJiraModal(true)}
+                    onClick={handleOpenJiraModal}
                     title="Reconnect to Jira"
                   >
                     ⚙ Reconnect Jira
@@ -804,7 +962,7 @@ function App() {
               ) : (
                 <button 
                   className="jira-btn" 
-                  onClick={() => setShowJiraModal(true)}
+                  onClick={handleOpenJiraModal}
                   title="Connect to Jira"
                 >
                   🔗 Connect Jira
@@ -882,6 +1040,24 @@ function App() {
                 />
               </div>
               
+              <div className="form-group">
+                <label htmlFor="jiraProjectKey" className="form-label">
+                  Project Key (e.g., WP) *
+                </label>
+                <input
+                  type="text"
+                  id="jiraProjectKey"
+                  className="form-input"
+                  value={jiraFormData.projectKey || ''}
+                  onChange={(e) => handleJiraInputChange('projectKey', e.target.value)}
+                  placeholder="Enter your project key"
+                  required
+                />
+                <small style={{ color: '#666', marginTop: '4px', display: 'block' }}>
+                  Find this in your Jira URL, e.g., aswink1205.atlassian.net/jira/software/projects/<strong>WP</strong>/boards/2
+                </small>
+              </div>
+              
               <button
                 type="submit"
                 className="submit-btn"
@@ -897,9 +1073,90 @@ function App() {
         {/* Jira User Stories Section */}
         {jiraConnection && jiraUserStories.length > 0 && (
           <div className="jira-stories-section">
+            {/* Sprint Selector - Always visible when stories exist */}
+            <div className="sprint-selector">
+              <label className="sprint-selector-label">📅 Sprint:</label>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                {jiraSprints.length > 0 ? (
+                  <select 
+                    className="sprint-selector-dropdown"
+                    value={selectedSprintId || ''}
+                    onChange={(e) => handleSprintChange(e.target.value ? parseInt(e.target.value) : null)}
+                    disabled={sprintsLoading}
+                  >
+                    <option value="">All Stories (No Sprint Filter)</option>
+                    {jiraSprints.map((sprint) => (
+                      <option key={sprint.id} value={sprint.id}>
+                        {sprint.name} ({sprint.state})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flex: 1 }}>
+                    <input
+                      type="number"
+                      placeholder="Enter Sprint ID"
+                      value={manualSprintId}
+                      onChange={(e) => setManualSprintId(e.target.value)}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '4px',
+                        border: '1px solid #ddd',
+                        fontSize: '14px'
+                      }}
+                    />
+                    <button
+                      className="jira-btn"
+                      onClick={() => {
+                        if (manualSprintId.trim() && jiraConnection) {
+                          handleSprintChange(parseInt(manualSprintId))
+                        }
+                      }}
+                      disabled={!manualSprintId.trim() || sprintsLoading}
+                      style={{ whiteSpace: 'nowrap' }}
+                    >
+                      Filter Sprint
+                    </button>
+                    <button
+                      className="jira-btn"
+                      onClick={() => {
+                        setManualSprintId('')
+                        handleSprintChange(null)
+                      }}
+                      style={{ whiteSpace: 'nowrap' }}
+                    >
+                      Clear Filter
+                    </button>
+                  </div>
+                )}
+                {sprintsLoading && <span style={{ fontSize: '12px', color: '#666' }}>Loading sprints...</span>}
+              </div>
+              {jiraSprints.length === 0 && <p style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>💡 Tip: If sprints list didn't load, enter the sprint ID manually or try refreshing</p>}
+            </div>
+            
             <div className="jira-stories-header">
               <span>📋 Jira User Stories ({jiraUserStories.length})</span>
               <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                {jiraUserStories.length > 0 && (
+                  <>
+                    <button
+                      className="jira-btn"
+                      onClick={handleSelectAllStories}
+                      title="Select all stories"
+                      style={{ background: '#3498db', fontSize: '13px', padding: '6px 12px' }}
+                    >
+                      ☑ Select All
+                    </button>
+                    <button
+                      className="jira-btn"
+                      onClick={handleDeselectAllStories}
+                      title="Deselect all stories"
+                      style={{ background: '#95a5a6', fontSize: '13px', padding: '6px 12px' }}
+                    >
+                      ☐ Deselect All
+                    </button>
+                  </>
+                )}
                 {selectedStoryIds.size > 0 && (
                   <button
                     className="jira-btn"
@@ -913,7 +1170,7 @@ function App() {
                 )}
                 <button 
                   className="jira-btn"
-                  onClick={() => fetchJiraUserStories(jiraConnection)}
+                  onClick={() => fetchJiraUserStories(jiraConnection, selectedSprintId || undefined)}
                   disabled={jiraLoading}
                 >
                   🔄 Refresh
@@ -954,6 +1211,19 @@ function App() {
             </div>
           </div>
         )}
+        
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+          <h3 style={{ margin: 0, fontSize: '18px', color: '#2c3e50' }}>📝 Story Details</h3>
+          <button
+            type="button"
+            onClick={handleClearForm}
+            className="jira-btn"
+            title="Clear all form fields"
+            style={{ background: '#e74c3c', color: 'white', fontSize: '13px', padding: '6px 12px' }}
+          >
+            🗑️ Clear All Fields
+          </button>
+        </div>
         
         <form onSubmit={handleSubmit} className="form-container">
           <div className="form-group">
